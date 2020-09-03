@@ -1,5 +1,6 @@
 package eu.vitinger.systemSettingsTester
 
+import android.content.Context
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
@@ -9,7 +10,9 @@ import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.android.synthetic.main.activity_main.*
+import kotlin.reflect.KClass
 import kotlin.reflect.KProperty
+import kotlin.reflect.full.functions
 
 /**
  *
@@ -22,12 +25,25 @@ class MainActivity : AppCompatActivity() {
 
     private val types = listOf(Int::class, String::class, Long::class, Float::class)
 
-    private val keysAdapter: ArrayAdapter<String> by lazy {
-        ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, getKeysFromSystemSettings())
+    private val keysAdapter: KeysAdapter by lazy {
+        KeysAdapter(this, getKeysFromSystemSettings())
     }
 
     private val typesAdapter: ArrayAdapter<String> by lazy {
-        ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, types.map { it.simpleName })
+        ArrayAdapter<String>(
+            this,
+            android.R.layout.simple_spinner_item,
+            types.map { it.simpleName })
+    }
+
+    class KeysAdapter(context: Context, private val keyProperties: List<SettingProperty>) :
+        ArrayAdapter<String>(context, android.R.layout.simple_spinner_item) {
+
+        init {
+            addAll(keyProperties.map { "${it.clazz.simpleName} - ${it.key.name}" })
+        }
+
+        fun getSettingsProperty(position: Int): SettingProperty = keyProperties[position]
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,13 +57,18 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) {
             }
 
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                getValueFromSettings()
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                getValueFromSettings(getSelectedSettingsProperty())
             }
         }
         spinner_type.adapter = typesAdapter
 
-        btn_set.setOnClickListener { setValueToSettings() }
+        btn_set.setOnClickListener { setValueToSettings(getSelectedSettingsProperty()) }
     }
 
     override fun onResume() {
@@ -55,40 +76,77 @@ class MainActivity : AppCompatActivity() {
         WriteSettingsPermissionHelper.checkAndAskPermissionIfNeeded(this)
     }
 
-    private fun getValueFromSettings() {
-        val valueFromSettings = Settings.Global.getString(contentResolver, getSelectedKey())
+    private fun getValueFromSettings(property: SettingProperty) {
+        val valueFromSettings =
+            findMethod(property, "getString").call(contentResolver, property.key.call()) as String?
         txt_value.setText(valueFromSettings)
     }
 
-    private fun setValueToSettings() {
+    private fun findMethod(property: SettingProperty, methodName: String) =
+        property.clazz.functions.first { it.name == methodName }
+
+    private fun setValueToSettings(property: SettingProperty) {
         runCatching {
             val value = txt_value.text.toString()
             when (types[spinner_type.selectedItemPosition]) {
-                Int::class -> Settings.Global.putInt(contentResolver, getSelectedKey(), value.toInt())
-                String::class -> Settings.Global.putString(contentResolver, getSelectedKey(), value)
-                Long::class -> Settings.Global.putLong(contentResolver, getSelectedKey(), value.toLong())
-                Float::class -> Settings.Global.putFloat(contentResolver, getSelectedKey(), value.toFloat())
+                Int::class -> setValueToSettings(property, "putInt", value.toInt())
+                String::class -> setValueToSettings(property, "putString", value)
+                Long::class -> setValueToSettings(property, "putLong", value.toLong())
+                Float::class -> setValueToSettings(property, "putFloat", value.toFloat())
                 else -> throw IllegalArgumentException("Unknown type selected ${spinner_type.selectedItem}")
             }
         }.onFailure { ex ->
-            Log.e(localClassName, "set operation failed", ex)
-            Toast.makeText(this, ex.toString(), Toast.LENGTH_LONG).show()
+            Log.e(localClassName, "set operation failed", ex.cause)
+            Toast.makeText(this, ex.cause.toString(), Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun getSelectedKey(): String? {
-        return (spinner_key.selectedItem as String?)?.let { constantName ->
-            Settings.Global::class.members.first { it.name == constantName }.call() as String
-        }
+    private fun setValueToSettings(
+        property: SettingProperty,
+        methodName: String,
+        value: Any
+    ) = findMethod(property, methodName).call(contentResolver, property.key.call(), value)
+
+    private fun getSelectedSettingsProperty(): SettingProperty {
+        return keysAdapter.getSettingsProperty(spinner_key.selectedItemPosition)
     }
 
-    private fun getKeysFromSystemSettings(): List<String> {
-        return Settings.Global::class.members
-                .filterIsInstance<KProperty<String>>()
-                .filter { it.isConst }
-                .map { it.name }
-                .also {
-                    Toast.makeText(this, "Found ${it.size} keys", Toast.LENGTH_LONG).show()
-                }
+    /**
+     * [Settings.Global] should be preferred over [Settings.System] in case of duplicity in the constant name.
+     */
+    private fun getKeysFromSystemSettings(): List<SettingProperty> {
+        return getKeysFromSettings(Settings.Global::class)
+            .union(getKeysFromSettings(Settings.System::class))
+            .toList()
+            .sortedBy { it.key.name }
+            .sortedBy { it.clazz.simpleName }
+            .also {
+                Toast.makeText(this, "Found ${it.size} keys", Toast.LENGTH_LONG).show()
+            }
+    }
+
+    private fun getKeysFromSettings(clazz: KClass<out Settings.NameValueTable>): List<SettingProperty> {
+        return clazz.members
+            .filterIsInstance<KProperty<String>>()
+            .filter { it.isConst }
+            .map { SettingProperty(clazz, it) }
+    }
+
+    /**
+     * Implementation of [equals] and [hashCode] should avoid duplicities in keys in the case they are defined in more than one classes.
+     */
+    class SettingProperty(
+        val clazz: KClass<out Settings.NameValueTable>,
+        val key: KProperty<String>
+    ) {
+        override fun equals(other: Any?): Boolean {
+            return if (other is SettingProperty) {
+                key.name == other.key.name
+            } else false
+        }
+
+        override fun hashCode(): Int {
+            return key.name.hashCode()
+        }
     }
 }
