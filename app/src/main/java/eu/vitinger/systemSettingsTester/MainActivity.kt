@@ -96,8 +96,8 @@ class MainActivity : AppCompatActivity() {
                 else -> throw IllegalArgumentException("Unknown type selected ${spinner_type.selectedItem}")
             }
         }.onFailure { ex ->
-            Log.e(localClassName, "set operation failed", ex.cause)
-            Toast.makeText(this, ex.cause.toString(), Toast.LENGTH_LONG).show()
+            Log.e(localClassName, "set operation failed", ex)
+            Toast.makeText(this, (ex.cause ?: ex).toString(), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -121,6 +121,9 @@ class MainActivity : AppCompatActivity() {
             .sortedBy { it.key.name }
             .sortedBy { it.clazz.simpleName }
             .also {
+                it.forEach { property ->
+                    Log.i(localClassName, "${property.clazz.simpleName};${property.key.name}")
+                }
                 Toast.makeText(this, "Found ${it.size} keys", Toast.LENGTH_LONG).show()
             }
     }
